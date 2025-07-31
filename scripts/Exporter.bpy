@@ -1,0 +1,104 @@
+import bpy
+import csv
+import os
+import mathutils
+
+# === CONFIG ===
+project_dir = bpy.path.abspath("//")
+output_path = os.path.join(project_dir, "lut.csv")
+display_width_m = 1.98
+display_height_m = 1.08
+texture_width = 800
+texture_height = 300
+
+def linear_interpolate(u, v, uv_coords, vertex_coords):
+    if len(uv_coords) != 4:
+        return None  # Only handle quads
+
+    uv00, uv10, uv11, uv01 = uv_coords
+    p00, p10, p11, p01 = vertex_coords
+
+    du = (u - uv00.x) / (uv10.x - uv00.x) if uv10.x != uv00.x else 0
+    dv = (v - uv00.y) / (uv01.y - uv00.y) if uv01.y != uv00.y else 0
+
+    top = p00.lerp(p10, du)
+    bottom = p01.lerp(p11, du)
+    return top.lerp(bottom, dv)
+
+# === EXECUTION ===
+bpy.ops.object.mode_set(mode='OBJECT')
+lut_data = []
+
+for obj in bpy.context.selected_objects:
+    if obj.type != 'MESH': continue
+
+    mesh = obj.data
+    panel_name = obj.name
+    uv_layer = mesh.uv_layers.active.data
+
+    coords = [uv_layer[li].uv.copy() for li in range(len(uv_layer))]
+    min_u = min(c.x for c in coords)
+    max_u = max(c.x for c in coords)
+    min_v = min(c.y for c in coords)
+    max_v = max(c.y for c in coords)
+    
+    texture_width = 800
+    texture_height = 300
+    start_x = int(round(min_u * texture_width))
+    end_x = int(round(max_u * texture_width)) -1
+    start_y = int(round(min_v * texture_height))
+    end_y = int(round(max_v * texture_height)) -1
+
+    texel_w = int(round((max_u - min_u) * texture_width))
+    texel_h = int(round((max_v - min_v) * texture_height))
+
+    print(f"{panel_name} UV bounds: min_u={min_u}, max_u={max_u}, min_v={min_v}, max_v={max_v}, texel_w={texel_w}, texel_h={texel_h}")
+
+    # Step size based on diode count
+    step_x = (end_x - start_x) / (texel_w - 1) if texel_w > 1 else 0
+    step_y = (end_y - start_y) / (texel_h - 1) if texel_h > 1 else 0
+
+    for j in range(texel_h):
+        for i in range(texel_w):
+            # Integer UV coordinates
+            uv_u = int(round(start_x + i * step_x))
+            uv_v = int(round(start_y + j * step_y))
+            # Spatial interpolation (your existing logic)
+            spatial = None
+            for poly in mesh.polygons:
+                if len(poly.loop_indices) != 4:
+                    continue
+                loop_idxs = poly.loop_indices
+                uv_coords = [uv_layer[li].uv.copy() for li in loop_idxs]
+                vertex_coords = [mesh.vertices[mesh.loops[li].vertex_index].co.copy() for li in loop_idxs]
+                uv_x = [uv.x for uv in uv_coords]
+                uv_y = [uv.y for uv in uv_coords]
+                epsilon = 1e-6
+                if min(uv_x) - epsilon <= (uv_u / texture_width) <= max(uv_x) + epsilon and \
+                   min(uv_y) - epsilon <= (uv_v / texture_height) <= max(uv_y) + epsilon:
+                    co = linear_interpolate(uv_u / texture_width, uv_v / texture_height, uv_coords, vertex_coords)
+                    if co:
+                        spatial = co
+                        break
+            if spatial:
+                norm_x = spatial.x / display_width_m
+                norm_y = 1.0 - (spatial.y / display_height_m)
+                lut_data.append({
+                    "Panel": panel_name,
+                    "UV_U": uv_u,
+                    "UV_V": uv_v,
+                    "Norm_X": norm_x,
+                    "Norm_Y": norm_y
+                })
+                # Debug for last iteration
+                if i == texel_w - 1 and j == texel_h - 1:
+                    print(f"Last i={i}, j={j}, uv_u={uv_u}, uv_v={uv_v}, norm_x={norm_x:.6f}, norm_y={norm_y:.6f}")
+
+# === EXPORT ===
+with open(output_path, "w", newline='') as csvfile:
+    fieldnames = ["Panel", "UV_U", "UV_V", "Norm_X", "Norm_Y"]
+    writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(lut_data)
+
+print(f"✅ Export complete with {len(lut_data)} mapped texels → {output_path}")
